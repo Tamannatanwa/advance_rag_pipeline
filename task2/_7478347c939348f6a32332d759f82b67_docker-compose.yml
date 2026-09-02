@@ -1,0 +1,48 @@
+version: "3.4"
+
+services:
+  weaviate:
+    image: cr.weaviate.io/semitechnologies/weaviate:1.24.10
+    command:
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --scheme
+      - http
+    ports:
+      - "8080:8080"
+    restart: on-failure:0
+    depends_on:
+      - t2v-transformers
+    environment:
+      # Convenience
+      QUERY_DEFAULTS_LIMIT: "25"
+
+      # Auth (fine for local learning)
+      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
+
+      # Persistence
+      PERSISTENCE_DATA_PATH: "/var/lib/weaviate"
+
+      # Vectorizer: local, open-source
+      DEFAULT_VECTORIZER_MODULE: "text2vec-transformers"
+      ENABLE_MODULES: "text2vec-transformers"
+      TRANSFORMERS_INFERENCE_API: "http://t2v-transformers:8080"
+
+      # Single-node setup
+      CLUSTER_HOSTNAME: "node1"
+
+    volumes:
+      - weaviate_data:/var/lib/weaviate
+
+  t2v-transformers:
+    image: cr.weaviate.io/semitechnologies/transformers-inference:sentence-transformers-all-MiniLM-L6-v2
+    restart: on-failure:0
+    environment:
+      # Optional: reduce noise
+      ENABLE_CUDA: "0"
+
+volumes:
+  weaviate_data:
+
