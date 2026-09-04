@@ -1,0 +1,7 @@
+Query: Compare Corrective RAG and Self-RAG, and how do we evaluate them?
+Answer: Corrective RAG evaluates retrieved documents before generation and triggers corrective actions, such as query rewrites or external searches, if the context is insufficient or incorrect. In contrast, Self-RAG validates the final generated answer against the retrieved sources, triggering regeneration or a refusal if the output is not grounded. RAG systems like these are evaluated using the RAG Triad (Context Precision, Faithfulness, and Answer Relevance) and through A/B testing that compares different variants on the same query set.
+
+Faithfulness: 5.0
+Answer Relevance: 5.0
+Context Precision: 3.0
+Overall Score (0-5): 4.33
