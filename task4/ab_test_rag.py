@@ -10,7 +10,7 @@ No Weaviate, no Docker. Everything runs in one Python process:
                    auto-falls back through MODEL_CANDIDATES if a model name
                    gets retired)
   - Judge:        Gemini, scoring the RAG-Triad (faithfulness, answer
-                   relevance, context precision)
+                   relevance, context precision) in a SINGLE call per answer
 
 Setup:
     pip install -r requirements.txt
@@ -21,15 +21,22 @@ Setup:
 Run:
     python3 ab_test_rag.py
 
-CHANGELOG (fixes for httpx.RemoteProtocolError / dropped connections):
-  - call_gemini() and embed_text() now also catch httpx transport errors
-    (RemoteProtocolError, ConnectError, ReadTimeout, ConnectTimeout, PoolTimeout)
-    and retry with backoff, instead of letting them crash the script.
-  - MIN_SECONDS_BETWEEN_CALLS raised from 4.5s -> 8s (free tier was getting
-    rate-limited immediately, which correlates with the disconnects).
-  - genai.Client now sets an explicit 60s HTTP timeout.
-  - run_ab_test() now saves partial progress after every query to
-    ab_test_results_partial.json, so a mid-run crash doesn't lose everything.
+CHANGELOG:
+  v2 (network hardening):
+    - call_gemini() / embed_text() now also catch httpx transport errors
+      (RemoteProtocolError, ConnectError, ReadTimeout, ConnectTimeout,
+      PoolTimeout) and retry with backoff instead of crashing.
+    - MIN_SECONDS_BETWEEN_CALLS raised 4.5s -> 8s.
+    - genai.Client now sets an explicit 60s HTTP timeout.
+    - run_ab_test() saves partial progress after every query to
+      ab_test_results_partial.json and resumes from it automatically.
+  v3 (call-count reduction, this version):
+    - The three RAG-Triad judge calls (faithfulness, answer relevance,
+      context precision) are now merged into ONE call per answer, returning
+      all three as a single JSON object. This cuts total API calls by
+      roughly 30%, which matters a lot on a rate-limited free tier.
+    - MIN_SECONDS_BETWEEN_CALLS raised again, 8s -> 10s, since the merged
+      judge call is a slightly longer prompt/response.
 """
 
 import os
@@ -66,10 +73,7 @@ TOP_K = 4
 RELEVANCE_THRESHOLD = 3            # out of 5, used by Corrective RAG's grader
 
 # Free-tier pacing: space out calls so we don't hit per-minute quotas.
-# Raised from 4.5 -> 8 seconds; the original value was tripping rate limits
-# almost immediately, and repeated 429s correlate with the server dropping
-# the connection outright (RemoteProtocolError) rather than returning 429.
-MIN_SECONDS_BETWEEN_CALLS = 8.0
+MIN_SECONDS_BETWEEN_CALLS = 10.0
 _last_call_time = 0.0
 
 # Network-level exceptions that mean "retry", not "crash".
@@ -156,6 +160,17 @@ def call_gemini(prompt: str, model: str = None, temperature: float = 0.0,
                 time.sleep(wait)
                 last_error = e
                 continue
+            except errors.ServerError as e:
+                # 503 UNAVAILABLE / 500 INTERNAL: Google's servers are overloaded,
+                # not a quota problem. Retry with backoff; if it keeps failing,
+                # fall through to the next candidate model (a less-congested model
+                # may respond even when this one is under heavy load).
+                wait = min(45, 8 * (attempt + 1))
+                print(f"  [server overloaded: {getattr(e, 'code', '5xx')}] waiting {wait}s "
+                      f"before retrying ({attempt + 1}/{max_retries})...")
+                time.sleep(wait)
+                last_error = e
+                continue
         else:
             continue
     raise RuntimeError(
@@ -192,9 +207,16 @@ def embed_text(text: str, task_type: str = "RETRIEVAL_DOCUMENT",
             time.sleep(wait)
             last_error = e
             continue
+        except errors.ServerError as e:
+            wait = min(45, 8 * (attempt + 1))
+            print(f"  [server overloaded: {getattr(e, 'code', '5xx')}] waiting {wait}s "
+                  f"before retrying embedding ({attempt + 1}/{max_retries})...")
+            time.sleep(wait)
+            last_error = e
+            continue
     raise RuntimeError(
-        "Gemini embed_content kept failing (rate limits or network errors). "
-        f"Last error: {last_error}. Try again in a minute."
+        "Gemini embed_content kept failing (rate limits, server errors, or "
+        f"network errors). Last error: {last_error}. Try again in a minute."
     )
 
 
@@ -478,70 +500,27 @@ Answer:
 
 # =========================================================
 # JUDGE: RAG-TRIAD (faithfulness, answer relevance, context precision)
+# Merged into a SINGLE call per answer (was 3 separate calls) to cut API
+# usage roughly 30% on a rate-limited free tier.
 # =========================================================
-def judge_metric(prompt: str, model: str = JUDGE_MODEL) -> Dict[str, Any]:
-    text = call_gemini(prompt, model=model)
-    cleaned = re.sub(r"^```(json)?|```$", "", text.strip(), flags=re.MULTILINE).strip()
-    try:
-        parsed = json.loads(cleaned)
-    except Exception:
-        parsed = {"verdict": "no", "score_0_5": 0, "rationale": f"Unparseable judge output: {text[:200]}"}
-    return parsed
+_DEFAULT_METRIC = {"verdict": "no", "score_0_5": 0, "rationale": "Unparseable judge output."}
 
 
 def evaluate_rag_triad(question: str, contexts: List[str], answer: str,
                         model: str = JUDGE_MODEL) -> Dict[str, Any]:
     context_block = "\n\n---\n\n".join(contexts) if contexts else "(no context)"
 
-    faithfulness_prompt = f'''
-You are evaluating a RAG system.
+    prompt = f'''
+You are evaluating a RAG system on three metrics. Score each 0 (worst) to
+5 (best).
 
-Metric: Faithfulness
-Definition: The answer must be fully supported by the provided context. If
-the answer adds facts not in context, that is a faithfulness failure.
-
-Context:
-{context_block}
-
-Answer:
-{answer}
-
-Return ONLY JSON with these keys:
-{{
-  "verdict": "yes" or "no",
-  "score_0_5": 0 to 5,
-  "rationale": "one short sentence"
-}}
-'''
-    faithfulness = judge_metric(faithfulness_prompt, model=model)
-
-    relevance_prompt = f'''
-You are evaluating a RAG system.
-
-Metric: Answer Relevance
-Definition: The answer should directly address the user's question.
-
-Question:
-{question}
-
-Answer:
-{answer}
-
-Return ONLY JSON:
-{{
-  "verdict": "yes" or "no",
-  "score_0_5": 0 to 5,
-  "rationale": "one short sentence"
-}}
-'''
-    answer_relevance = judge_metric(relevance_prompt, model=model)
-
-    context_precision_prompt = f'''
-You are evaluating a RAG system.
-
-Metric: Context Precision
-Definition: The retrieved context should be relevant to the user's question.
-Irrelevant context lowers precision.
+1. Faithfulness: the answer must be fully supported by the provided context.
+   If the answer adds facts not in context, that is a faithfulness failure.
+2. Answer Relevance: the answer should directly address the user's question.
+3. Context Precision: the retrieved context should be relevant to the
+   user's question. Irrelevant or heavily duplicated context lowers precision.
+   Scoring guide: 5 = fully relevant, 3 = partially relevant / misses an
+   important part, 1 = barely relevant, 0 = not related.
 
 Question:
 {question}
@@ -549,26 +528,35 @@ Question:
 Context:
 {context_block}
 
-Scoring guide:
-5 = fully relevant context
-3 = partially relevant / misses an important part
-1 = barely relevant
-0 = not related
+Answer:
+{answer}
 
-Return ONLY JSON:
+Return ONLY a single JSON object with exactly this shape, nothing else:
 {{
-  "verdict": "yes" or "no",
-  "score_0_5": 0 to 5,
-  "rationale": "one short sentence"
+  "faithfulness": {{"verdict": "yes" or "no", "score_0_5": 0-5, "rationale": "one short sentence"}},
+  "answer_relevance": {{"verdict": "yes" or "no", "score_0_5": 0-5, "rationale": "one short sentence"}},
+  "context_precision": {{"verdict": "yes" or "no", "score_0_5": 0-5, "rationale": "one short sentence"}}
 }}
 '''
-    context_precision = judge_metric(context_precision_prompt, model=model)
+    text = call_gemini(prompt, model=model)
+    cleaned = re.sub(r"^```(json)?|```$", "", text.strip(), flags=re.MULTILINE).strip()
 
-    return {
-        "faithfulness": faithfulness,
-        "answer_relevance": answer_relevance,
-        "context_precision": context_precision,
-    }
+    try:
+        parsed = json.loads(cleaned)
+    except Exception:
+        parsed = {}
+
+    # Defensive fallback: if the judge returned malformed/partial JSON,
+    # fill in any missing keys so downstream code (summarize()) never KeyErrors.
+    result = {}
+    for key in ("faithfulness", "answer_relevance", "context_precision"):
+        value = parsed.get(key) if isinstance(parsed, dict) else None
+        if isinstance(value, dict) and "score_0_5" in value:
+            result[key] = value
+        else:
+            result[key] = dict(_DEFAULT_METRIC,
+                                rationale=f"Unparseable judge output for '{key}': {text[:150]}")
+    return result
 
 
 # =========================================================
@@ -590,16 +578,19 @@ def _avg(values: List[float]) -> float:
     return round(statistics.mean(values), 2) if values else 0.0
 
 
+def _stdev(values: List[float]) -> float:
+    return round(statistics.stdev(values), 2) if len(values) > 1 else 0.0
+
+
 def _load_partial_rows() -> List[Dict[str, Any]]:
-    """Resume support: if a previous run crashed partway through, pick up
-    where it left off instead of re-paying for already-completed queries."""
+    """Resume support: if a previous run crashed/rate-limited partway through,
+    pick up where it left off instead of re-paying for completed queries."""
     if os.path.exists(PARTIAL_RESULTS_PATH):
         try:
             with open(PARTIAL_RESULTS_PATH, "r") as f:
                 data = json.load(f)
             rows = data.get("rows", [])
-            done_questions = {r["question"] for r in rows}
-            if done_questions:
+            if rows:
                 print(f"Resuming: found {len(rows)} completed query result(s) "
                       f"in {PARTIAL_RESULTS_PATH}.")
             return rows
@@ -642,7 +633,7 @@ def run_ab_test(resume: bool = True) -> Dict[str, Any]:
               f"context_precision={b_eval['context_precision']['score_0_5']} "
               f"(correction attempts: {b_result['correction_attempts']})")
 
-        # Save progress after EVERY query so a crash doesn't lose completed work.
+        # Save progress after EVERY query so a crash/rate-limit doesn't lose completed work.
         with open(PARTIAL_RESULTS_PATH, "w") as f:
             json.dump({"rows": rows}, f, indent=2)
 
@@ -657,19 +648,23 @@ def run_ab_test(resume: bool = True) -> Dict[str, Any]:
 
 
 def summarize(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Per-pattern averages AND standard deviation (spread), so the report
+    can discuss consistency, not just a single average number."""
     def collect(pattern_key: str, metric_key: str) -> List[float]:
         return [r[pattern_key]["eval"][metric_key]["score_0_5"] for r in rows]
 
     summary = {}
     for pattern_key in ("agentic_rag", "corrective_rag"):
-        summary[pattern_key] = {
-            "avg_faithfulness": _avg(collect(pattern_key, "faithfulness")),
-            "avg_answer_relevance": _avg(collect(pattern_key, "answer_relevance")),
-            "avg_context_precision": _avg(collect(pattern_key, "context_precision")),
-        }
-    summary["corrective_rag"]["avg_correction_attempts"] = _avg(
-        [r["corrective_rag"]["correction_attempts"] for r in rows]
-    )
+        summary[pattern_key] = {}
+        for metric_key in ("faithfulness", "answer_relevance", "context_precision"):
+            values = collect(pattern_key, metric_key)
+            summary[pattern_key][f"avg_{metric_key}"] = _avg(values)
+            summary[pattern_key][f"stdev_{metric_key}"] = _stdev(values)
+            summary[pattern_key][f"scores_{metric_key}"] = values  # raw per-query scores
+    attempts = [r["corrective_rag"]["correction_attempts"] for r in rows]
+    summary["corrective_rag"]["avg_correction_attempts"] = _avg(attempts)
+    summary["corrective_rag"]["correction_attempts_per_query"] = attempts
+    summary["num_queries_evaluated"] = len(rows)
     return summary
 
 
@@ -679,15 +674,16 @@ def save_results(rows: List[Dict[str, Any]], summary: Dict[str, Any]) -> None:
 
     with open("score.txt", "w") as f:
         f.write("A/B TEST RESULTS: Agentic RAG vs Corrective RAG\n")
-        f.write("=" * 55 + "\n\n")
+        f.write("=" * 55 + "\n")
+        f.write(f"Queries evaluated: {summary['num_queries_evaluated']}\n\n")
         for pattern_key, label in (("agentic_rag", "Agentic RAG"), ("corrective_rag", "Corrective RAG")):
             s = summary[pattern_key]
             f.write(f"{label}\n")
-            f.write(f"  Avg Faithfulness:       {s['avg_faithfulness']} / 5\n")
-            f.write(f"  Avg Answer Relevance:   {s['avg_answer_relevance']} / 5\n")
-            f.write(f"  Avg Context Precision:  {s['avg_context_precision']} / 5\n")
+            f.write(f"  Faithfulness:       avg {s['avg_faithfulness']} / 5  (stdev {s['stdev_faithfulness']})\n")
+            f.write(f"  Answer Relevance:   avg {s['avg_answer_relevance']} / 5  (stdev {s['stdev_answer_relevance']})\n")
+            f.write(f"  Context Precision:  avg {s['avg_context_precision']} / 5  (stdev {s['stdev_context_precision']})\n")
             if "avg_correction_attempts" in s:
-                f.write(f"  Avg Correction Attempts:{s['avg_correction_attempts']}\n")
+                f.write(f"  Avg Correction Attempts: {s['avg_correction_attempts']}\n")
             f.write("\n")
 
     print("\nSaved detailed results to ab_test_results.json")
