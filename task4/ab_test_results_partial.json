@@ -1,0 +1,48 @@
+{
+  "rows": [
+    {
+      "question": "Compare Product A and Product B, then summarize customer feedback for Product B.",
+      "agentic_rag": {
+        "answer": "Based on the provided information, here is a comparison between Product A and Product B, followed by a summary of customer feedback for Product B:\n\n### Comparison: Product A vs. Product B\n\n* **Target Audience & Purpose:**\n  * **Product A:** A lightweight analytics dashboard built for small teams.\n  * **Product B:** An enterprise analytics platform designed for large-scale enterprise needs.\n\n* **Ease of Use & Setup:**\n  * **Product A:** Quick to get started with clean default templates and a simple drag-and-drop editor.\n  * **Product B:** Requires more setup effort and is complex to configure, especially compared to Product A.\n\n* **Features & Customization:**\n  * **Product A:** Includes pre-built templates, drag-and-drop editing, and one-click sharing. It offers limited customization, which power users requiring custom metrics may outgrow.\n  * **Product B:** Offers advanced customization (including custom dashboards), role-based access control, an open API for integrations, analytics capabilities, governance, and priority support.\n\n* **Pricing:**\n  * **Product A:** Has a flat pricing model of $29/month per workspace with unlimited seats (no enterprise tiers or volume discounts).\n  * **Product B:** Exact pricing is not publicly listed; it scales based on usage tiers, data volume, and specific advanced features enabled.\n\n---\n\n### Customer Feedback Summary for Product B\n\n* **Complexity and Setup:** A common concern among users is the complexity of setup and configuration, which is noted as being significantly more complex than Product A.\n* **Capabilities and Features:** Customers frequently praise its powerful capabilities suited for enterprise needs, specifically highlighting its performance in dashboards, analytics, governance, and open APIs.",
+        "eval": {
+          "faithfulness": {
+            "verdict": "yes",
+            "score_0_5": 5,
+            "rationale": "All facts and statements presented in the answer are directly supported by the provided context."
+          },
+          "answer_relevance": {
+            "verdict": "yes",
+            "score_0_5": 5,
+            "rationale": "The answer directly and completely addresses both requested tasks: comparing Product A and Product B, and summarizing customer feedback for Product B."
+          },
+          "context_precision": {
+            "verdict": "no",
+            "score_0_5": 3,
+            "rationale": "The retrieved context contains all necessary details for the response, but precision is compromised by heavy duplication of several chunks."
+          }
+        }
+      },
+      "corrective_rag": {
+        "answer": "Product A is praised for being quick to get started and having clean default templates, but it has limited customization and power users outgrow it when they need custom metrics. Product B, in contrast, offers advanced features and deeper customization aimed at enterprise needs, including capabilities in dashboards, analytics, governance, and APIs, as well as role-based access control and an open API for integrations. However, Product B is complex to configure and requires more setup effort than Product A.\n\nCustomer feedback for Product B indicates that it can be complex to configure, especially when compared to Product A. While its powerful features for enterprise needs, such as dashboards, analytics, governance, and APIs, are frequently mentioned, the complexity of setup and configuration is a common concern among users.",
+        "eval": {
+          "faithfulness": {
+            "verdict": "yes",
+            "score_0_5": 5,
+            "rationale": "All information in the answer is directly supported by the provided context without adding any new facts."
+          },
+          "answer_relevance": {
+            "verdict": "yes",
+            "score_0_5": 5,
+            "rationale": "The answer directly compares Product A and Product B and then summarizes customer feedback for Product B, fully addressing the user's question."
+          },
+          "context_precision": {
+            "verdict": "yes",
+            "score_0_5": 5,
+            "rationale": "The context fully addresses both parts of the question by providing a comparison of Product A and Product B, and summarizing customer feedback specifically for Product B."
+          }
+        },
+        "correction_attempts": 1
+      }
+    }
+  ]
+}
